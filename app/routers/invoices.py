@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -10,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import AdminUser, Customer, Invoice, InvoiceItem, PointsMode, ShopSettings
+from app.models import AdminUser, Customer, Invoice, InvoiceItem, PaymentMode, PointsMode, ShopSettings
 from app.pagination import page_meta
 from app.points import compute_line_points, compute_points
 from app.schemas import (
@@ -158,12 +159,30 @@ def list_invoices(
     page_size: int = Query(10, ge=1, le=100),
     customer_id: UUID | None = None,
     search: str | None = None,
+    payment_mode: PaymentMode | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    sort: str = Query(
+        "date",
+        pattern="^(date|amount|qty|points|invoice_no|customer|payment)$",
+    ),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
 ) -> PaginatedInvoices:
     stmt = select(Invoice).options(joinedload(Invoice.customer))
     count_stmt = select(func.count()).select_from(Invoice)
+
     if customer_id:
         stmt = stmt.where(Invoice.customer_id == customer_id)
         count_stmt = count_stmt.where(Invoice.customer_id == customer_id)
+    if payment_mode:
+        stmt = stmt.where(Invoice.payment_mode == payment_mode)
+        count_stmt = count_stmt.where(Invoice.payment_mode == payment_mode)
+    if from_date:
+        stmt = stmt.where(Invoice.purchased_at >= from_date)
+        count_stmt = count_stmt.where(Invoice.purchased_at >= from_date)
+    if to_date:
+        stmt = stmt.where(Invoice.purchased_at <= to_date)
+        count_stmt = count_stmt.where(Invoice.purchased_at <= to_date)
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.join(Customer).where(
@@ -172,11 +191,29 @@ def list_invoices(
         count_stmt = count_stmt.select_from(Invoice).join(Customer).where(
             (Invoice.invoice_no.ilike(like)) | (Customer.name.ilike(like))
         )
+    elif sort == "customer":
+        stmt = stmt.join(Customer)
+
+    ascending = order == "asc"
+    columns = {
+        "date": Invoice.purchased_at,
+        "amount": Invoice.total_amount,
+        "qty": Invoice.total_qty,
+        "points": Invoice.points_earned,
+        "invoice_no": Invoice.invoice_no,
+        "customer": Customer.name,
+        "payment": Invoice.payment_mode,
+    }
+    primary = columns.get(sort, Invoice.purchased_at)
+    primary_order = primary.asc() if ascending else primary.desc()
+    if sort in ("invoice_no", "payment", "customer"):
+        order_by = (primary_order,)
+    else:
+        order_by = (primary_order, Invoice.created_at.desc())
+
     total = db.scalar(count_stmt) or 0
     rows = db.scalars(
-        stmt.order_by(Invoice.purchased_at.desc(), Invoice.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        stmt.order_by(*order_by).offset((page - 1) * page_size).limit(page_size)
     ).unique().all()
     return PaginatedInvoices(items=[_to_list(r) for r in rows], meta=page_meta(total, page, page_size))
 

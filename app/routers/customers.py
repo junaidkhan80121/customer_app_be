@@ -39,6 +39,8 @@ def list_customers(
     search: str | None = None,
     type_id: UUID | None = None,
     active_only: bool = False,
+    sort: str = Query("name", pattern="^(name|phone|type|points|status)$"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
 ) -> PaginatedCustomers:
     stmt = select(Customer).options(joinedload(Customer.customer_type))
     count_stmt = select(func.count()).select_from(Customer)
@@ -54,9 +56,25 @@ def list_customers(
         stmt = stmt.where(Customer.is_active.is_(True))
         count_stmt = count_stmt.where(Customer.is_active.is_(True))
 
+    if sort == "type":
+        stmt = stmt.join(CustomerType)
+
+    ascending = order == "asc"
+    columns = {
+        "name": Customer.name,
+        "phone": Customer.phone,
+        "type": CustomerType.name,
+        "points": Customer.lifetime_points,
+        "status": Customer.is_active,
+    }
+    primary = columns.get(sort, Customer.name)
+    primary_order = primary.asc() if ascending else primary.desc()
+
     total = db.scalar(count_stmt) or 0
     rows = db.scalars(
-        stmt.order_by(Customer.name).offset((page - 1) * page_size).limit(page_size)
+        stmt.order_by(primary_order, Customer.name.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).unique().all()
     return PaginatedCustomers(items=[_to_out(c) for c in rows], meta=page_meta(total, page, page_size))
 

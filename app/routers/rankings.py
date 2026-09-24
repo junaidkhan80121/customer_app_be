@@ -53,6 +53,7 @@ def _ranking_query(
     end: date | None,
     type_id: UUID | None,
     sort: str,
+    order: str,
     page: int,
     page_size: int,
 ) -> tuple[list[RankingRow], int]:
@@ -64,16 +65,21 @@ def _ranking_query(
     if type_id:
         filters.append(Customer.type_id == type_id)
 
+    total_qty = func.coalesce(func.sum(Invoice.total_qty), 0)
+    total_amount = func.coalesce(func.sum(Invoice.total_amount), 0)
+    total_points = func.coalesce(func.sum(Invoice.points_earned), 0)
+    invoice_count = func.count(Invoice.id)
+
     agg = (
         select(
             Customer.id.label("customer_id"),
             Customer.name.label("customer_name"),
             Customer.phone.label("phone"),
             CustomerType.name.label("type_name"),
-            func.coalesce(func.sum(Invoice.total_qty), 0).label("total_qty"),
-            func.coalesce(func.sum(Invoice.total_amount), 0).label("total_amount"),
-            func.coalesce(func.sum(Invoice.points_earned), 0).label("total_points"),
-            func.count(Invoice.id).label("invoice_count"),
+            total_qty.label("total_qty"),
+            total_amount.label("total_amount"),
+            total_points.label("total_points"),
+            invoice_count.label("invoice_count"),
         )
         .select_from(Customer)
         .join(CustomerType, Customer.type_id == CustomerType.id)
@@ -85,13 +91,19 @@ def _ranking_query(
     count_stmt = select(func.count()).select_from(agg.subquery())
     total = db.scalar(count_stmt) or 0
 
-    order_expr = {
-        "qty": func.coalesce(func.sum(Invoice.total_qty), 0).desc(),
-        "amount": func.coalesce(func.sum(Invoice.total_amount), 0).desc(),
-        "points": func.coalesce(func.sum(Invoice.points_earned), 0).desc(),
-    }.get(sort, func.coalesce(func.sum(Invoice.total_amount), 0).desc())
-
-    ordered = agg.order_by(order_expr, Customer.name.asc())
+    ascending = order == "asc"
+    columns = {
+        "qty": total_qty,
+        "amount": total_amount,
+        "points": total_points,
+        "customer_name": Customer.name,
+        "phone": Customer.phone,
+        "type_name": CustomerType.name,
+        "invoice_count": invoice_count,
+    }
+    primary = columns.get(sort, total_amount)
+    primary_order = primary.asc() if ascending else primary.desc()
+    ordered = agg.order_by(primary_order, Customer.name.asc())
 
     rows = db.execute(ordered.offset((page - 1) * page_size).limit(page_size)).all()
     items = [
@@ -116,7 +128,11 @@ def rankings(
     _: Annotated[AdminUser, Depends(get_current_admin)],
     slab_id: UUID | None = None,
     type_id: UUID | None = None,
-    sort: str = Query("amount", pattern="^(qty|amount|points)$"),
+    sort: str = Query(
+        "amount",
+        pattern="^(qty|amount|points|customer_name|phone|type_name|invoice_count)$",
+    ),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     from_date: date | None = None,
@@ -124,7 +140,14 @@ def rankings(
 ) -> RankingResponse:
     start, end, slab_name = _resolve_date_range(db, slab_id, from_date, to_date)
     items, total = _ranking_query(
-        db, start=start, end=end, type_id=type_id, sort=sort, page=page, page_size=page_size
+        db,
+        start=start,
+        end=end,
+        type_id=type_id,
+        sort=sort,
+        order=order,
+        page=page,
+        page_size=page_size,
     )
     return RankingResponse(
         items=items,
@@ -142,7 +165,14 @@ def dashboard(
 ) -> DashboardOut:
     start, end, _ = _resolve_date_range(db, None, None, None)
     top, _ = _ranking_query(
-        db, start=start, end=end, type_id=None, sort="amount", page=1, page_size=5
+        db,
+        start=start,
+        end=end,
+        type_id=None,
+        sort="amount",
+        order="desc",
+        page=1,
+        page_size=5,
     )
     customer_count = db.scalar(select(func.count()).select_from(Customer)) or 0
     invoice_count = db.scalar(select(func.count()).select_from(Invoice)) or 0
