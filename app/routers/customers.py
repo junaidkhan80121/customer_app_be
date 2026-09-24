@@ -4,11 +4,12 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import AdminUser, Customer, CustomerType
+from app.models import AdminUser, Customer, CustomerType, Invoice
 from app.pagination import page_meta
 from app.schemas import CustomerCreate, CustomerOut, CustomerUpdate, PaginatedCustomers
 from app.security import get_current_admin
@@ -150,3 +151,22 @@ def update_customer(
         select(Customer).options(joinedload(Customer.customer_type)).where(Customer.id == customer_id)
     )
     return _to_out(row)
+
+
+@router.delete("/{customer_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+def delete_customer(
+    customer_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[AdminUser, Depends(get_current_admin)],
+) -> Response:
+    row = db.scalar(
+        select(Customer)
+        .options(joinedload(Customer.invoices).joinedload(Invoice.items))
+        .where(Customer.id == customer_id)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    # Cascade removes invoices + line items via relationship
+    db.delete(row)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

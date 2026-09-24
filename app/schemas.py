@@ -111,12 +111,16 @@ class ShopSettingsUpdate(BaseModel):
 class TimeSlabCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     months: int = Field(ge=1, le=120)
+    start_date: date | None = None
+    end_date: date | None = None
     is_default: bool = False
 
 
 class TimeSlabUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     months: int | None = Field(default=None, ge=1, le=120)
+    start_date: date | None = None
+    end_date: date | None = None
     is_default: bool | None = None
 
 
@@ -124,6 +128,8 @@ class TimeSlabOut(ORMModel):
     id: UUID
     name: str
     months: int
+    start_date: date | None = None
+    end_date: date | None = None
     is_default: bool
     created_at: datetime
 

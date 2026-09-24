@@ -32,6 +32,11 @@ def _ensure_settings(db: Session) -> ShopSettings:
     return row
 
 
+def _validate_slab_dates(start_date, end_date) -> None:
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="Start date must be on or before end date")
+
+
 @router.get("/settings", response_model=ShopSettingsOut)
 def get_settings(
     db: Annotated[Session, Depends(get_db)],
@@ -74,9 +79,16 @@ def create_slab(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[AdminUser, Depends(get_current_admin)],
 ) -> TimeSlab:
+    _validate_slab_dates(body.start_date, body.end_date)
     if body.is_default:
         db.execute(update(TimeSlab).values(is_default=False))
-    row = TimeSlab(name=body.name.strip(), months=body.months, is_default=body.is_default)
+    row = TimeSlab(
+        name=body.name.strip(),
+        months=body.months,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        is_default=body.is_default,
+    )
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -93,15 +105,24 @@ def update_slab(
     row = db.get(TimeSlab, slab_id)
     if not row:
         raise HTTPException(status_code=404, detail="Time slab not found")
-    if body.is_default:
+
+    data = body.model_dump(exclude_unset=True)
+
+    if data.get("is_default") is True:
         db.execute(update(TimeSlab).values(is_default=False))
         row.is_default = True
-    elif body.is_default is False:
+    elif "is_default" in data and data["is_default"] is False:
         row.is_default = False
-    if body.name is not None:
-        row.name = body.name.strip()
-    if body.months is not None:
-        row.months = body.months
+    if "name" in data and data["name"] is not None:
+        row.name = data["name"].strip()
+    if "months" in data and data["months"] is not None:
+        row.months = data["months"]
+    if "start_date" in data:
+        row.start_date = data["start_date"]
+    if "end_date" in data:
+        row.end_date = data["end_date"]
+
+    _validate_slab_dates(row.start_date, row.end_date)
     db.commit()
     db.refresh(row)
     return row

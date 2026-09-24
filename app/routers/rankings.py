@@ -25,6 +25,7 @@ def _resolve_date_range(
     from_date: date | None,
     to_date: date | None,
 ) -> tuple[date | None, date | None, str | None]:
+    # Explicit leaderboard From/To always wins
     if from_date or to_date:
         return from_date, to_date or date.today(), None
 
@@ -41,6 +42,15 @@ def _resolve_date_range(
     if not slab:
         return None, date.today(), None
 
+    # Optional fixed window on the slab
+    if slab.start_date is not None or slab.end_date is not None:
+        start = slab.start_date
+        end = slab.end_date or date.today()
+        if start and end and start > end:
+            raise HTTPException(status_code=400, detail="Slab start_date must be on or before end_date")
+        return start, end, slab.name
+
+    # Rolling window from today
     end = date.today()
     start = end - relativedelta(months=slab.months)
     return start, end, slab.name

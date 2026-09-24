@@ -75,7 +75,9 @@ class Customer(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     customer_type: Mapped[CustomerType] = relationship(back_populates="customers")
-    invoices: Mapped[list[Invoice]] = relationship(back_populates="customer")
+    invoices: Mapped[list[Invoice]] = relationship(
+        back_populates="customer", cascade="all, delete-orphan"
+    )
 
 
 class ShopSettings(Base):
@@ -101,6 +103,8 @@ class TimeSlab(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     months: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
