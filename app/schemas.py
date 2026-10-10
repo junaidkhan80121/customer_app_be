@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.models import PaymentMode, PointsMode
+from app.models import PaymentMode, PointsMode, SchemeMetric
 
 
 class ORMModel(BaseModel):
@@ -134,8 +134,39 @@ class TimeSlabOut(ORMModel):
     created_at: datetime
 
 
+# ---- Catalog items ----
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    sku: str = Field(min_length=1, max_length=64)
+    price: Decimal = Field(ge=0)
+    points_enabled: bool = True
+    is_active: bool = True
+
+
+class ItemUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    sku: str | None = Field(default=None, min_length=1, max_length=64)
+    price: Decimal | None = Field(default=None, ge=0)
+    points_enabled: bool | None = None
+    is_active: bool | None = None
+
+
+class ItemOut(ORMModel):
+    id: UUID
+    name: str
+    description: str | None
+    sku: str
+    price: Decimal
+    points_enabled: bool
+    is_active: bool
+    created_at: datetime
+
+
 # ---- Invoices ----
 class InvoiceItemIn(BaseModel):
+    item_id: UUID | None = None
     item_name: str = Field(min_length=1, max_length=200)
     qty: Decimal = Field(gt=0)
     unit: str = Field(default="piece", max_length=40)
@@ -145,6 +176,8 @@ class InvoiceItemIn(BaseModel):
 
 class InvoiceItemOut(ORMModel):
     id: UUID
+    item_id: UUID | None = None
+    sku: str | None = None
     item_name: str
     qty: Decimal
     unit: str
@@ -203,6 +236,63 @@ class InvoiceListOut(ORMModel):
     created_at: datetime
 
 
+# ---- Schemes ----
+class SchemeCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    metric: SchemeMetric
+    threshold: Decimal = Field(gt=0)
+    start_date: date | None = None
+    end_date: date | None = None
+    is_active: bool = True
+
+
+class SchemeUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    metric: SchemeMetric | None = None
+    threshold: Decimal | None = Field(default=None, gt=0)
+    start_date: date | None = None
+    end_date: date | None = None
+    clear_dates: bool = False
+    is_active: bool | None = None
+
+
+class SchemeOut(BaseModel):
+    id: UUID
+    name: str
+    description: str | None
+    metric: SchemeMetric
+    threshold: Decimal
+    start_date: date | None = None
+    end_date: date | None = None
+    is_active: bool
+    qualified_count: int = 0
+    created_at: datetime
+
+
+class CustomerSchemeStatus(BaseModel):
+    scheme_id: UUID
+    name: str
+    description: str | None
+    metric: SchemeMetric
+    threshold: Decimal
+    progress: Decimal
+    qualified: bool
+    start_date: date | None = None
+    end_date: date | None = None
+
+
+class SchemeCustomerRow(BaseModel):
+    customer_id: UUID
+    customer_name: str
+    phone: str
+    type_name: str | None = None
+    progress: Decimal
+    invoice_count: int
+    qualified: bool
+
+
 # ---- Rankings / pagination ----
 class PageMeta(BaseModel):
     total: int
@@ -235,9 +325,32 @@ class PaginatedCustomers(BaseModel):
     meta: PageMeta
 
 
+class PaginatedItems(BaseModel):
+    items: list[ItemOut]
+    meta: PageMeta
+
+
 class PaginatedInvoices(BaseModel):
     items: list[InvoiceListOut]
     meta: PageMeta
+
+
+class PaginatedSchemes(BaseModel):
+    items: list[SchemeOut]
+    meta: PageMeta
+
+
+class PaginatedSchemeCustomers(BaseModel):
+    items: list[SchemeCustomerRow]
+    meta: PageMeta
+
+
+class CustomerPurchases(BaseModel):
+    items: list[InvoiceOut]
+    meta: PageMeta
+    total_qty: Decimal
+    total_amount: Decimal
+    total_points: Decimal
 
 
 class DashboardOut(BaseModel):
