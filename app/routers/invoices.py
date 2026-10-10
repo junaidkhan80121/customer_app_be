@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import AdminUser, Customer, Invoice, InvoiceItem, PaymentMode, PointsMode, ShopSettings
+from app.models import AdminUser, Customer, Invoice, InvoiceItem, Item, PaymentMode, PointsMode, ShopSettings
 from app.pagination import page_meta
 from app.points import compute_line_points, compute_points
 from app.schemas import (
@@ -41,28 +41,64 @@ def _next_invoice_no(db: Session) -> str:
     return f"INV-{count + 1:05d}"
 
 
+def _catalog_for(db: Session, items: list[InvoiceItemIn]) -> dict[UUID, Item]:
+    ids = list({item.item_id for item in items if item.item_id})
+    if not ids:
+        return {}
+    rows = list(db.scalars(select(Item).where(Item.id.in_(ids))).all())
+    found = {row.id: row for row in rows}
+    missing = [item_id for item_id in ids if item_id not in found]
+    if missing:
+        raise HTTPException(status_code=400, detail="One or more items were not found")
+    inactive = next((row for row in found.values() if not row.is_active), None)
+    if inactive:
+        raise HTTPException(status_code=400, detail=f"Inactive item: {inactive.sku}")
+    return found
+
+
+def _earns_points(item: InvoiceItemIn, catalog: dict[UUID, Item]) -> bool:
+    """Free-text lines still earn points. Catalog lines earn only when points are enabled."""
+    if item.item_id is None:
+        return True
+    return bool(catalog[item.item_id].points_enabled)
+
+
 def _apply_items(
     invoice: Invoice,
     items: list[InvoiceItemIn],
     settings: ShopSettings,
     points_override: Decimal | None,
+    db: Session,
 ) -> None:
+    catalog = _catalog_for(db, items)
     invoice.items.clear()
     total_qty = Decimal("0")
     total_amount = Decimal("0")
+    eligible_qty = Decimal("0")
+    eligible_amount = Decimal("0")
     line_points_sum = Decimal("0")
+    earns_flags: list[bool] = []
 
     for item in items:
+        earns = _earns_points(item, catalog)
+        catalog_row = catalog.get(item.item_id) if item.item_id else None
         line_amount = (item.qty * item.unit_price).quantize(Decimal("0.01"))
-        line_pts = compute_line_points(
-            line_amount=line_amount,
-            qty=item.qty,
-            settings=settings,
-            item_override=item.points_earned if settings.points_mode == PointsMode.MANUAL else None,
-        )
+        if earns:
+            line_pts = compute_line_points(
+                line_amount=line_amount,
+                qty=item.qty,
+                settings=settings,
+                item_override=item.points_earned if settings.points_mode == PointsMode.MANUAL else None,
+            )
+            eligible_qty += item.qty
+            eligible_amount += line_amount
+        else:
+            line_pts = Decimal("0")
         invoice.items.append(
             InvoiceItem(
-                item_name=item.item_name.strip(),
+                item_id=item.item_id,
+                sku=catalog_row.sku if catalog_row else None,
+                item_name=(catalog_row.name if catalog_row else item.item_name).strip(),
                 qty=item.qty,
                 unit=item.unit.strip() or "piece",
                 unit_price=item.unit_price,
@@ -70,6 +106,7 @@ def _apply_items(
                 points_earned=line_pts,
             )
         )
+        earns_flags.append(earns)
         total_qty += item.qty
         total_amount += line_amount
         line_points_sum += line_pts
@@ -85,26 +122,30 @@ def _apply_items(
         invoice.points_overridden = False
     else:
         invoice.points_earned = compute_points(
-            amount=total_amount, qty=total_qty, settings=settings, override=None
+            amount=eligible_amount, qty=eligible_qty, settings=settings, override=None
         )
         invoice.points_overridden = False
+        earning_lines = [line for line, earns in zip(invoice.items, earns_flags, strict=True) if earns]
+        for line, earns in zip(invoice.items, earns_flags, strict=True):
+            if not earns:
+                line.points_earned = Decimal("0")
         # redistribute line points proportionally for display when using invoice-level formula
-        if total_amount > 0 and settings.points_mode in (
+        if eligible_amount > 0 and settings.points_mode in (
             PointsMode.RUPEES_PER_POINT,
             PointsMode.PERCENTAGE_OF_AMOUNT,
         ):
             remaining = invoice.points_earned
-            for i, line in enumerate(invoice.items):
-                if i == len(invoice.items) - 1:
+            for i, line in enumerate(earning_lines):
+                if i == len(earning_lines) - 1:
                     line.points_earned = remaining
                 else:
-                    share = (line.line_amount / total_amount * invoice.points_earned).quantize(
+                    share = (line.line_amount / eligible_amount * invoice.points_earned).quantize(
                         Decimal("0.01")
                     )
                     line.points_earned = share
                     remaining -= share
         elif settings.points_mode == PointsMode.PER_QUANTITY:
-            for line in invoice.items:
+            for line in earning_lines:
                 line.points_earned = compute_line_points(
                     line_amount=line.line_amount, qty=line.qty, settings=settings
                 )
@@ -228,12 +269,17 @@ def create_invoice(
     if not customer:
         raise HTTPException(status_code=400, detail="Customer not found")
     settings = _get_settings(db)
+    catalog = _catalog_for(db, body.items)
     if settings.points_mode == PointsMode.MANUAL:
         for item in body.items:
-            if item.points_earned is None and body.points_override is None:
+            if (
+                _earns_points(item, catalog)
+                and item.points_earned is None
+                and body.points_override is None
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail="Manual points mode: enter points on each line or set invoice points override",
+                    detail="Manual points mode: enter points on each points-enabled line or set invoice points override",
                 )
 
     inv = Invoice(
@@ -246,7 +292,7 @@ def create_invoice(
     )
     db.add(inv)
     db.flush()
-    _apply_items(inv, body.items, settings, body.points_override)
+    _apply_items(inv, body.items, settings, body.points_override, db)
     _adjust_lifetime(customer, inv.points_earned)
     db.commit()
     inv = db.scalar(
@@ -320,7 +366,15 @@ def update_invoice(
         override = inv.points_earned
 
     if body.items is not None:
-        _apply_items(inv, body.items, settings, override)
+        if settings.points_mode == PointsMode.MANUAL and override is None:
+            catalog = _catalog_for(db, body.items)
+            for item in body.items:
+                if _earns_points(item, catalog) and item.points_earned is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Manual points mode: enter points on each points-enabled line or set invoice points override",
+                    )
+        _apply_items(inv, body.items, settings, override, db)
     elif override is not None:
         inv.points_earned = override
         inv.points_overridden = True
