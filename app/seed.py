@@ -13,8 +13,11 @@ from app.models import (
     CustomerType,
     Invoice,
     InvoiceItem,
+    Item,
     PaymentMode,
     PointsMode,
+    Scheme,
+    SchemeMetric,
     ShopSettings,
     TimeSlab,
 )
@@ -88,6 +91,48 @@ def seed() -> None:
                 db.add(c)
                 db.flush()
             customers.append(c)
+
+        demo_items = [
+            ("Vitrified Tile 2x2", "Glazed floor tile", "TILE-2X2", Decimal("850"), True),
+            ("CPVC Pipe 1 inch", "Hot water pipe", "PIPE-CPVC-1", Decimal("320"), True),
+            ("Cement Grey", "OPC cement bag", "CEM-GREY", Decimal("380"), True),
+            ("Wall Putty", "Interior wall putty", "PUTTY-WALL", Decimal("650"), False),
+            ("LED Panel 18W", "Square ceiling panel", "LED-18W", Decimal("420"), True),
+            ("Sanitary Closet", "Floor mounted closet", "SAN-CLOSET", Decimal("6500"), True),
+            ("Basin Mixer", "Chrome basin mixer", "MIX-BASIN", Decimal("1800"), False),
+            ("Grout", "Tile grout", "GROUT-KG", Decimal("90"), True),
+        ]
+        for name, description, sku, price, points_on in demo_items:
+            if not db.scalar(select(Item).where(Item.sku == sku)):
+                db.add(
+                    Item(
+                        name=name,
+                        description=description,
+                        sku=sku,
+                        price=price,
+                        points_enabled=points_on,
+                        is_active=True,
+                    )
+                )
+        print("Catalog items ready")
+
+        demo_schemes = [
+            ("Silver buyer", "Customer crosses ₹5,000 in purchases", SchemeMetric.AMOUNT, Decimal("5000")),
+            ("Gold buyer", "Customer crosses ₹20,000 in purchases", SchemeMetric.AMOUNT, Decimal("20000")),
+            ("Bulk quantity", "Customer crosses 50 units purchased", SchemeMetric.QUANTITY, Decimal("50")),
+        ]
+        for name, description, metric, threshold in demo_schemes:
+            if not db.scalar(select(Scheme).where(Scheme.name == name)):
+                db.add(
+                    Scheme(
+                        name=name,
+                        description=description,
+                        metric=metric,
+                        threshold=threshold,
+                        is_active=True,
+                    )
+                )
+        print("Schemes ready")
 
         if db.scalar(select(Invoice).limit(1)):
             db.commit()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
@@ -9,9 +11,18 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import AdminUser, Customer, CustomerType, Invoice
+from app.models import AdminUser, Customer, CustomerType, Invoice, InvoiceItem, PaymentMode, Scheme
 from app.pagination import page_meta
-from app.schemas import CustomerCreate, CustomerOut, CustomerUpdate, PaginatedCustomers
+from app.routers.invoices import _to_out as invoice_to_out
+from app.scheme_progress import progress_for_customer
+from app.schemas import (
+    CustomerCreate,
+    CustomerOut,
+    CustomerPurchases,
+    CustomerSchemeStatus,
+    CustomerUpdate,
+    PaginatedCustomers,
+)
 from app.security import get_current_admin
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])
@@ -170,3 +181,116 @@ def delete_customer(
     db.delete(row)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _scoped_invoices(customer_id: UUID):
+    return select(Invoice).where(Invoice.customer_id == customer_id)
+
+
+@router.get("/{customer_id}/purchases", response_model=CustomerPurchases)
+def customer_purchases(
+    customer_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[AdminUser, Depends(get_current_admin)],
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    search: str | None = None,
+    payment_mode: PaymentMode | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    sort: str = Query("date", pattern="^(date|amount|qty|points|invoice_no|payment)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+) -> CustomerPurchases:
+    if not db.get(Customer, customer_id):
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    stmt = _scoped_invoices(customer_id).options(
+        joinedload(Invoice.items),
+        joinedload(Invoice.customer).joinedload(Customer.customer_type),
+    )
+    count_stmt = select(func.count()).select_from(Invoice).where(Invoice.customer_id == customer_id)
+    sum_stmt = select(
+        func.coalesce(func.sum(Invoice.total_qty), 0),
+        func.coalesce(func.sum(Invoice.total_amount), 0),
+        func.coalesce(func.sum(Invoice.points_earned), 0),
+    ).where(Invoice.customer_id == customer_id)
+
+    if payment_mode:
+        stmt = stmt.where(Invoice.payment_mode == payment_mode)
+        count_stmt = count_stmt.where(Invoice.payment_mode == payment_mode)
+        sum_stmt = sum_stmt.where(Invoice.payment_mode == payment_mode)
+    if from_date:
+        stmt = stmt.where(Invoice.purchased_at >= from_date)
+        count_stmt = count_stmt.where(Invoice.purchased_at >= from_date)
+        sum_stmt = sum_stmt.where(Invoice.purchased_at >= from_date)
+    if to_date:
+        stmt = stmt.where(Invoice.purchased_at <= to_date)
+        count_stmt = count_stmt.where(Invoice.purchased_at <= to_date)
+        sum_stmt = sum_stmt.where(Invoice.purchased_at <= to_date)
+    if search:
+        like = f"%{search.strip()}%"
+        item_match = (
+            select(InvoiceItem.id)
+            .where(InvoiceItem.invoice_id == Invoice.id, InvoiceItem.item_name.ilike(like))
+            .exists()
+        )
+        filt = or_(Invoice.invoice_no.ilike(like), Invoice.notes.ilike(like), item_match)
+        stmt = stmt.where(filt)
+        count_stmt = count_stmt.where(filt)
+        sum_stmt = sum_stmt.where(filt)
+
+    ascending = order == "asc"
+    columns = {
+        "date": Invoice.purchased_at,
+        "amount": Invoice.total_amount,
+        "qty": Invoice.total_qty,
+        "points": Invoice.points_earned,
+        "invoice_no": Invoice.invoice_no,
+        "payment": Invoice.payment_mode,
+    }
+    primary = columns.get(sort, Invoice.purchased_at)
+    primary_order = primary.asc() if ascending else primary.desc()
+
+    total = db.scalar(count_stmt) or 0
+    qty, amount, points = db.execute(sum_stmt).one()
+    rows = db.scalars(
+        stmt.order_by(primary_order, Invoice.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).unique().all()
+    return CustomerPurchases(
+        items=[invoice_to_out(row) for row in rows],
+        meta=page_meta(total, page, page_size),
+        total_qty=Decimal(qty or 0),
+        total_amount=Decimal(amount or 0),
+        total_points=Decimal(points or 0),
+    )
+
+
+@router.get("/{customer_id}/schemes", response_model=list[CustomerSchemeStatus])
+def customer_schemes(
+    customer_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[AdminUser, Depends(get_current_admin)],
+) -> list[CustomerSchemeStatus]:
+    if not db.get(Customer, customer_id):
+        raise HTTPException(status_code=404, detail="Customer not found")
+    schemes = list(db.scalars(select(Scheme).where(Scheme.is_active.is_(True)).order_by(Scheme.name)).all())
+    rows: list[CustomerSchemeStatus] = []
+    for scheme in schemes:
+        progress, _count = progress_for_customer(db, scheme, customer_id)
+        rows.append(
+            CustomerSchemeStatus(
+                scheme_id=scheme.id,
+                name=scheme.name,
+                description=scheme.description,
+                metric=scheme.metric,
+                threshold=scheme.threshold,
+                progress=progress,
+                qualified=progress >= scheme.threshold,
+                start_date=scheme.start_date,
+                end_date=scheme.end_date,
+            )
+        )
+    rows.sort(key=lambda row: (not row.qualified, row.name.lower()))
+    return rows
