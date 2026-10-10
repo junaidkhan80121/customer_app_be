@@ -38,6 +38,12 @@ class PaymentMode(str, enum.Enum):
     CARD = "card"
 
 
+class SchemeMetric(str, enum.Enum):
+    AMOUNT = "amount"
+    QUANTITY = "quantity"
+    POINTS = "points"
+
+
 class AdminUser(Base):
     __tablename__ = "admin_users"
 
@@ -109,6 +115,23 @@ class TimeSlab(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Scheme(Base):
+    __tablename__ = "schemes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metric: Mapped[SchemeMetric] = mapped_column(
+        Enum(SchemeMetric, name="scheme_metric", values_callable=lambda x: [e.value for e in x], native_enum=False),
+        nullable=False,
+    )
+    threshold: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Invoice(Base):
     __tablename__ = "invoices"
     __table_args__ = (UniqueConstraint("invoice_no", name="uq_invoice_no"),)
@@ -137,11 +160,28 @@ class Invoice(Base):
     )
 
 
+class Item(Base):
+    __tablename__ = "items"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sku: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    points_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class InvoiceItem(Base):
     __tablename__ = "invoice_items"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     invoice_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("invoices.id"), nullable=False)
+    item_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("items.id", ondelete="SET NULL"), nullable=True
+    )
+    sku: Mapped[str | None] = mapped_column(String(64), nullable=True)
     item_name: Mapped[str] = mapped_column(String(200), nullable=False)
     qty: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     unit: Mapped[str] = mapped_column(String(40), default="piece", nullable=False)
